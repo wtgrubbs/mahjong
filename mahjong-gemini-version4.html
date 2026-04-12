@@ -1,0 +1,470 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Classic Mahjong Solitaire</title>
+    <style>
+        body {
+            background-color: #0A4A22; /* Vegas style dark green */
+            color: #fff;
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            height: 100vh;
+            overflow: hidden;
+            touch-action: none; /* Prevents unwanted pull-to-refresh on mobile */
+        }
+
+        #controls {
+            display: flex;
+            gap: 15px;
+            padding: 15px;
+            background: rgba(0, 0, 0, 0.4);
+            width: 100%;
+            justify-content: center;
+            align-items: center;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+            z-index: 10;
+            flex-wrap: wrap; /* Allows controls to stack nicely on very narrow screens */
+        }
+
+        button, select {
+            padding: 8px 16px;
+            font-size: 16px;
+            cursor: pointer;
+            border: 2px solid #fff;
+            background: #2a2a2a;
+            color: #fff;
+            border-radius: 5px;
+            transition: background 0.2s;
+        }
+
+        button:hover, select:hover { background: #444; }
+        button:active { background: #111; }
+
+        #game-board-container {
+            flex-grow: 1;
+            position: relative;
+            width: 100%;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            overflow: hidden; /* Changed to hidden: scaling ensures it fits, preventing scrollbars */
+        }
+
+        #game-board {
+            position: relative;
+            transform-origin: center center; /* Ensures scaling happens from the middle */
+            transition: transform 0.2s ease-out; /* Smooth resizing when orientation changes */
+        }
+
+        .tile {
+            position: absolute;
+            width: 44px;
+            height: 60px;
+            background-color: #fcf9f0; 
+            background-size: 85%; 
+            background-position: center;
+            background-repeat: no-repeat;
+            background-blend-mode: darken; 
+            border-radius: 6px; 
+            cursor: pointer;
+            box-shadow: 
+                -2px 2px 3px rgba(0,0,0,0.5), 
+                inset 1px 1px 2px rgba(255,255,255,0.9), 
+                inset -1px -1px 3px rgba(0,0,0,0.15);
+            transition: transform 0.1s, box-shadow 0.1s, filter 0.2s;
+            user-select: none;
+        }
+
+        /* 3D offset effect based on layer (z-index) */
+        .tile::before {
+            content: '';
+            position: absolute;
+            top: 0; left: 0; right: 0; bottom: 0;
+            border-radius: 6px;
+            box-shadow: inset 0 0 8px rgba(100, 80, 50, 0.2); /* Worn edges */
+            pointer-events: none;
+        }
+
+        /* The selected state with red glowing edges */
+        .tile.selected {
+            box-shadow: 
+                -2px 2px 3px rgba(0,0,0,0.5), 
+                inset 0 0 10px 3px rgba(255, 0, 0, 0.7);
+            filter: brightness(1.1);
+        }
+
+        .tile.hinted {
+            filter: drop-shadow(0 0 8px yellow) brightness(1.2);
+            z-index: 1000 !important;
+        }
+
+        .tile.disabled {
+            filter: brightness(0.7); /* Darken blocked tiles slightly */
+            cursor: not-allowed;
+        }
+
+    </style>
+</head>
+<body>
+
+    <div id="controls">
+        <select id="layoutSelect">
+            <option value="turtle">Classic Turtle</option>
+            <option value="pyramid">Pyramid</option>
+            <option value="arena">Arena</option>
+        </select>
+        <button id="newGameBtn">New Game</button>
+        <button id="hintBtn">Hint</button>
+        <button id="muteBtn">Mute: OFF</button>
+    </div>
+
+    <div id="game-board-container">
+        <div id="game-board"></div>
+    </div>
+
+<script>
+    // Audio Setup
+    const selectSound = new Audio('select.mp3');
+    const matchSound = new Audio('match.mp3');
+    let isMuted = false;
+
+    function playSound(sound) {
+        if (!isMuted) {
+            sound.currentTime = 0;
+            sound.play().catch(e => console.log("Audio playback requires user interaction first."));
+        }
+    }
+
+    // Controls
+    document.getElementById('muteBtn').addEventListener('click', (e) => {
+        isMuted = !isMuted;
+        e.target.innerText = isMuted ? "Mute: ON" : "Mute: OFF";
+    });
+
+    // Tile definition setup (144 tiles standard)
+    const suitCounts = { bams: 9, craks: 9, dots: 9 };
+    const honorCounts = { winds: 4, dragon: 3 };
+    
+    function generateDeck() {
+        let deck = [];
+        // Generate 4 of each standard suited and honor tile
+        for (let i = 0; i < 4; i++) {
+            for (let type in suitCounts) {
+                for (let num = 1; num <= suitCounts[type]; num++) deck.push({ type, num, matchGroup: `${type}_${num}` });
+            }
+            for (let type in honorCounts) {
+                for (let num = 1; num <= honorCounts[type]; num++) deck.push({ type, num, matchGroup: `${type}_${num}` });
+            }
+        }
+        // Generate 4 unique flowers and 4 unique seasons (can match any within their group)
+        for (let num = 1; num <= 4; num++) deck.push({ type: 'flower', num, matchGroup: 'flower' });
+        for (let num = 1; num <= 4; num++) deck.push({ type: 'seasons', num, matchGroup: 'seasons' });
+        return deck;
+    }
+
+    // Grid coordinates for different layouts.
+    // Each MUST total exactly 144 coordinate positions.
+    const layouts = {
+        turtle: [
+            // Layer 0 (Bottom) - 87 tiles
+            ...Array.from({length: 12}, (_, i) => ({x: 2 + i*2, y: 0, z: 0})),
+            ...Array.from({length: 8}, (_, i) => ({x: 6 + i*2, y: 2, z: 0})),
+            ...Array.from({length: 10}, (_, i) => ({x: 4 + i*2, y: 4, z: 0})),
+            ...Array.from({length: 12}, (_, i) => ({x: 2 + i*2, y: 6, z: 0})),
+            {x: 0, y: 7, z: 0}, {x: 26, y: 7, z: 0}, {x: 28, y: 7, z: 0},
+            ...Array.from({length: 12}, (_, i) => ({x: 2 + i*2, y: 8, z: 0})),
+            ...Array.from({length: 10}, (_, i) => ({x: 4 + i*2, y: 10, z: 0})),
+            ...Array.from({length: 8}, (_, i) => ({x: 6 + i*2, y: 12, z: 0})),
+            ...Array.from({length: 12}, (_, i) => ({x: 2 + i*2, y: 14, z: 0})),
+            // Layer 1 - 36 tiles
+            ...Array.from({length: 6}, (_, i) => ({x: 8 + i*2, y: 2, z: 1})),
+            ...Array.from({length: 6}, (_, i) => ({x: 8 + i*2, y: 4, z: 1})),
+            ...Array.from({length: 6}, (_, i) => ({x: 8 + i*2, y: 6, z: 1})),
+            ...Array.from({length: 6}, (_, i) => ({x: 8 + i*2, y: 8, z: 1})),
+            ...Array.from({length: 6}, (_, i) => ({x: 8 + i*2, y: 10, z: 1})),
+            ...Array.from({length: 6}, (_, i) => ({x: 8 + i*2, y: 12, z: 1})),
+            // Layer 2 - 16 tiles
+            ...Array.from({length: 4}, (_, i) => ({x: 10 + i*2, y: 4, z: 2})),
+            ...Array.from({length: 4}, (_, i) => ({x: 10 + i*2, y: 6, z: 2})),
+            ...Array.from({length: 4}, (_, i) => ({x: 10 + i*2, y: 8, z: 2})),
+            ...Array.from({length: 4}, (_, i) => ({x: 10 + i*2, y: 10, z: 2})),
+            // Layer 3 - 4 tiles
+            {x: 12, y: 6, z: 3}, {x: 14, y: 6, z: 3},
+            {x: 12, y: 8, z: 3}, {x: 14, y: 8, z: 3},
+            // Layer 4 (Top) - 1 tile
+            {x: 13, y: 7, z: 4}
+        ],
+        pyramid: [
+            // Top Structure Row - 12 tiles
+            ...Array.from({length: 12}, (_, i) => ({x: 2 + i*2, y: 0, z: 0})),
+            // Layer 0 (8x8) - 64 tiles
+            ...Array.from({length: 64}, (_, i) => ({x: 6 + (i%8)*2, y: 2 + Math.floor(i/8)*2, z: 0})),
+            // Layer 1 (6x6) - 36 tiles
+            ...Array.from({length: 36}, (_, i) => ({x: 8 + (i%6)*2, y: 4 + Math.floor(i/6)*2, z: 1})),
+            // Layer 2 (4x4) - 16 tiles
+            ...Array.from({length: 16}, (_, i) => ({x: 10 + (i%4)*2, y: 6 + Math.floor(i/4)*2, z: 2})),
+            // Layer 3 (2x2) - 4 tiles
+            ...Array.from({length: 4}, (_, i) => ({x: 12 + (i%2)*2, y: 8 + Math.floor(i/2)*2, z: 3})),
+            // Bottom Structure Row - 12 tiles
+            ...Array.from({length: 12}, (_, i) => ({x: 2 + i*2, y: 18, z: 0}))
+        ],
+        arena: (function() {
+            let layout = [];
+            // Layer 0: 10x10 hollow square (inner 6x6 hole) - 64 tiles
+            for(let r=0; r<10; r++) {
+                for(let c=0; c<10; c++) {
+                    if (!(r>=2 && r<8 && c>=2 && c<8)) layout.push({x: c*2, y: r*2, z: 0});
+                }
+            }
+            // Layer 1: 8x8 hollow square (inner 4x4 hole) - 48 tiles
+            for(let r=0; r<8; r++) {
+                for(let c=0; c<8; c++) {
+                    if (!(r>=2 && r<6 && c>=2 && c<6)) layout.push({x: 2+c*2, y: 2+r*2, z: 1});
+                }
+            }
+            // Layer 2: 6x6 hollow square (inner 2x2 hole) - 32 tiles
+            for(let r=0; r<6; r++) {
+                for(let c=0; c<6; c++) {
+                    if (!(r>=2 && r<4 && c>=2 && c<4)) layout.push({x: 4+c*2, y: 4+r*2, z: 2});
+                }
+            }
+            return layout;
+        })()
+    };
+
+    let activeTiles = [];
+    let selectedDomTile = null;
+
+    function shuffleArray(array) {
+        for (let i = array.length - 1; i > 0; i--) {
+            const j = Math.floor(Math.random() * (i + 1));
+            [array[i], array[j]] = [array[j], array[i]];
+        }
+    }
+
+    function resizeBoard() {
+        const container = document.getElementById('game-board-container');
+        const board = document.getElementById('game-board');
+        
+        // Ensure we have our base dimensions to calculate against
+        if (!board.dataset.baseWidth || !board.dataset.baseHeight) return;
+
+        const baseW = parseFloat(board.dataset.baseWidth);
+        const baseH = parseFloat(board.dataset.baseHeight);
+        
+        // Leave a 20px margin so it doesn't touch the absolute edge of the screen
+        const availW = container.clientWidth - 20;
+        const availH = container.clientHeight - 20;
+
+        // Determine the scale multiplier. Cap it at 1.2 so it doesn't get pixelated on huge monitors
+        const scale = Math.min(availW / baseW, availH / baseH, 1.2);
+        
+        board.style.transform = `scale(${scale})`;
+    }
+
+    function initGame() {
+        const board = document.getElementById('game-board');
+        board.innerHTML = '';
+        activeTiles = [];
+        selectedDomTile = null;
+
+        const deck = generateDeck();
+        shuffleArray(deck);
+
+        const layoutId = document.getElementById('layoutSelect').value;
+        const layoutCoords = layouts[layoutId];
+
+        // Base unit dimensions for positioning logic
+        const unitWidth = 22; 
+        const unitHeight = 30;
+        const zOffset = 5;
+        const tilePixelWidth = 44;
+        const tilePixelHeight = 60;
+
+        // Pass 1: Calculate the true pixel bounding box for dynamic centering
+        let minPx = Infinity, minPy = Infinity;
+        let maxPx = -Infinity, maxPy = -Infinity;
+
+        layoutCoords.forEach(coord => {
+            let px = coord.x * unitWidth - (coord.z * zOffset);
+            let py = coord.y * unitHeight - (coord.z * zOffset);
+            minPx = Math.min(minPx, px);
+            minPy = Math.min(minPy, py);
+            maxPx = Math.max(maxPx, px + tilePixelWidth);
+            maxPy = Math.max(maxPy, py + tilePixelHeight);
+        });
+
+        // Set the base game board dimensions exactly to the bounded box area plus slight padding
+        const finalWidth = maxPx - minPx + 20;
+        const finalHeight = maxPy - minPy + 20;
+        
+        board.style.width = finalWidth + 'px';
+        board.style.height = finalHeight + 'px';
+        
+        // Store base dimensions for the resizing function to use
+        board.dataset.baseWidth = finalWidth;
+        board.dataset.baseHeight = finalHeight;
+
+        // Pass 2: Place the tiles relative to the bounded center
+        layoutCoords.forEach((coord, i) => {
+            if(i >= 144) return;
+            let tileData = deck[i];
+            
+            let domNode = document.createElement('div');
+            domNode.className = 'tile';
+            domNode.id = `tile_${i}`;
+            
+            // Set position mapping and subtract minimums to flush left/top inside board
+            let px = coord.x * unitWidth - (coord.z * zOffset);
+            let py = coord.y * unitHeight - (coord.z * zOffset);
+            
+            // +10 offsets cleanly to accommodate the +20 padding applied to the board dimensions
+            domNode.style.left = `${(px - minPx) + 10}px`;
+            domNode.style.top = `${(py - minPy) + 10}px`;
+            domNode.style.zIndex = coord.z * 10 + i; 
+            
+            // Set image
+            let fileName = `${tileData.type} (${tileData.num}).png`;
+            domNode.style.backgroundImage = `url('${fileName}')`;
+
+            // Data attachments
+            let tileObj = {
+                id: domNode.id,
+                x: coord.x, y: coord.y, z: coord.z,
+                matchGroup: tileData.matchGroup,
+                dom: domNode,
+                active: true
+            };
+            activeTiles.push(tileObj);
+
+            // Touch/Mouse event handler unified
+            const handleInteract = (e) => {
+                e.preventDefault(); 
+                handleTileClick(tileObj);
+            };
+            domNode.addEventListener('mousedown', handleInteract);
+            domNode.addEventListener('touchstart', handleInteract, {passive: false});
+
+            board.appendChild(domNode);
+        });
+
+        updateTileStates();
+        resizeBoard(); // Automatically scale immediately upon loading the layout
+    }
+
+    function isTileOpen(tile) {
+        if (!tile.active) return false;
+        
+        let blockedLeft = false;
+        let blockedRight = false;
+        let blockedTop = false;
+
+        for (let other of activeTiles) {
+            if (!other.active || other === tile) continue;
+
+            // Check Top Block
+            if (other.z > tile.z) {
+                let overlapX = Math.abs(other.x - tile.x) < 2;
+                let overlapY = Math.abs(other.y - tile.y) < 2;
+                if (overlapX && overlapY) blockedTop = true;
+            }
+
+            // Check Sides 
+            if (other.z === tile.z && Math.abs(other.y - tile.y) < 2) {
+                if (other.x === tile.x - 2) blockedLeft = true;
+                if (other.x === tile.x + 2) blockedRight = true;
+            }
+        }
+
+        return !blockedTop && (!blockedLeft || !blockedRight);
+    }
+
+    function updateTileStates() {
+        activeTiles.forEach(t => {
+            if(t.active) {
+                if(!isTileOpen(t)) {
+                    t.dom.classList.add('disabled');
+                } else {
+                    t.dom.classList.remove('disabled');
+                }
+                t.dom.classList.remove('hinted'); 
+            }
+        });
+    }
+
+    function handleTileClick(tileObj) {
+        if (!isTileOpen(tileObj)) return;
+
+        playSound(selectSound);
+
+        if (!selectedDomTile) {
+            selectedDomTile = tileObj;
+            tileObj.dom.classList.add('selected');
+        } else {
+            if (selectedDomTile === tileObj) {
+                selectedDomTile.dom.classList.remove('selected');
+                selectedDomTile = null;
+            } else if (selectedDomTile.matchGroup === tileObj.matchGroup) {
+                playSound(matchSound);
+                
+                selectedDomTile.active = false;
+                tileObj.active = false;
+                
+                selectedDomTile.dom.style.visibility = 'hidden';
+                tileObj.dom.style.visibility = 'hidden';
+                
+                selectedDomTile.dom.classList.remove('selected');
+                selectedDomTile = null;
+
+                updateTileStates();
+                checkWin();
+            } else {
+                selectedDomTile.dom.classList.remove('selected');
+                selectedDomTile = tileObj;
+                tileObj.dom.classList.add('selected');
+            }
+        }
+    }
+
+    function showHint() {
+        let openTiles = activeTiles.filter(t => t.active && isTileOpen(t));
+        
+        for (let i = 0; i < openTiles.length; i++) {
+            for (let j = i + 1; j < openTiles.length; j++) {
+                if (openTiles[i].matchGroup === openTiles[j].matchGroup) {
+                    openTiles[i].dom.classList.add('hinted');
+                    openTiles[j].dom.classList.add('hinted');
+                    setTimeout(() => {
+                        openTiles[i].dom.classList.remove('hinted');
+                        openTiles[j].dom.classList.remove('hinted');
+                    }, 2000);
+                    return; 
+                }
+            }
+        }
+        alert("No valid pairs available! You may need to restart.");
+    }
+
+    function checkWin() {
+        if (activeTiles.every(t => !t.active)) {
+            setTimeout(() => alert("Congratulations! You cleared the board!"), 300);
+        }
+    }
+
+    // Event Listeners
+    document.getElementById('newGameBtn').addEventListener('click', initGame);
+    document.getElementById('hintBtn').addEventListener('click', showHint);
+    document.getElementById('layoutSelect').addEventListener('change', initGame);
+    window.addEventListener('resize', resizeBoard); // Handle window resizing and device rotation
+
+    window.onload = initGame;
+
+</script>
+</body>
+</html>
